@@ -161,6 +161,75 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def wrap_text_42(text: str) -> str:
+    if len(text) <= 42:
+        return text
+    
+    if " " in text:
+        words = text.split(" ")
+        total_len = len(text)
+        half_len = total_len / 2
+        
+        current_len = 0
+        best_split_idx = 1
+        min_diff = float("inf")
+        
+        for i in range(1, len(words)):
+            left_part = " ".join(words[:i])
+            diff = abs(len(left_part) - half_len)
+            if diff < min_diff:
+                min_diff = diff
+                best_split_idx = i
+                
+        line1 = " ".join(words[:best_split_idx])
+        line2 = " ".join(words[best_split_idx:])
+        return f"{line1}\n{line2}"
+    else:
+        mid = len(text) // 2
+        return f"{text[:mid]}\n{text[mid:]}"
+
+
+def format_srt_time(seconds: float) -> str:
+    if seconds is None:
+        seconds = 0.0
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int(round((seconds % 1) * 1000))
+    if millis > 999:
+        millis = 999
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def generate_srt_from_chunks(chunks: list) -> str:
+    srt_lines = []
+    for i, chunk in enumerate(chunks):
+        text = chunk.get("text", "").strip()
+        if not text:
+            continue
+        
+        text = wrap_text_42(text)
+        
+        ts = chunk.get("timestamp", (0.0, 0.0))
+        if ts is None:
+            ts = (0.0, 0.0)
+        start, end = ts
+        if start is None:
+            start = 0.0
+        if end is None:
+            end = start + 2.0
+            
+        start_str = format_srt_time(start)
+        end_str = format_srt_time(end)
+        
+        srt_lines.append(f"{i + 1}")
+        srt_lines.append(f"{start_str} --> {end_str}")
+        srt_lines.append(text)
+        srt_lines.append("")
+        
+    return "\n".join(srt_lines)
+
+
 def parse_srt(srt_path_or_content: str):
     if os.path.exists(srt_path_or_content):
         with open(srt_path_or_content, 'r', encoding='utf-8', errors='ignore') as f:
@@ -717,12 +786,17 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                             label="Output Audio / 合成结果",
                             type="numpy",
                         )
+                        vc_subtitle = gr.File(
+                            label="Download Subtitle (.srt) / 下载字幕 (.srt)",
+                            file_types=[".srt"],
+                            interactive=False,
+                        )
                         vc_status = gr.Textbox(label="Status / 状态", lines=2)
 
                 def _clone_fn(
                     text, lang, ref_aud, ref_text, instruct, ns, gs, dn, sp, du, pp, po
                 ):
-                    return _gen(
+                    res = _gen(
                         text,
                         lang,
                         ref_aud,
@@ -737,6 +811,46 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         mode="clone",
                         ref_text=ref_text or None,
                     )
+                    
+                    audio_data, status = res
+                    if audio_data is None:
+                        return None, None, status
+                    
+                    srt_file_path = None
+                    if getattr(model, "_asr_pipe", None) is not None:
+                        try:
+                            sampling_rate, waveform_int16 = audio_data
+                            waveform_float32 = waveform_int16.astype(np.float32) / 32767.0
+                            
+                            asr_res = model._asr_pipe(
+                                {"array": waveform_float32, "sampling_rate": sampling_rate},
+                                return_timestamps=True
+                            )
+                            
+                            chunks = asr_res.get("chunks", [])
+                            if chunks:
+                                srt_content = generate_srt_from_chunks(chunks)
+                                
+                                temp_srt = tempfile.NamedTemporaryFile(
+                                    suffix=".srt", 
+                                    dir=os.environ.get("GRADIO_TEMP_DIR"), 
+                                    delete=False, 
+                                    mode='w', 
+                                    encoding='utf-8'
+                                )
+                                temp_srt.write(srt_content)
+                                temp_srt.close()
+                                srt_file_path = temp_srt.name
+                                status = "Done. Subtitle generated."
+                            else:
+                                status = "Done. No subtitle chunks detected."
+                        except Exception as e:
+                            logging.error(f"Error generating subtitle: {e}")
+                            status = f"Done. (Failed to generate subtitle: {e})"
+                    else:
+                        status = "Done. (ASR model not loaded, subtitle generation skipped)"
+                        
+                    return audio_data, srt_file_path, status
 
                 vc_btn.click(
                     _clone_fn,
@@ -754,7 +868,7 @@ by Xiaomi AI Lab Next-gen Kaldi team.
                         vc_pp,
                         vc_po,
                     ],
-                    outputs=[vc_audio, vc_status],
+                    outputs=[vc_audio, vc_subtitle, vc_status],
                 )
 
             # ==============================================================
