@@ -1131,11 +1131,17 @@ def main(argv=None) -> int:
     ]
     allowed_dirs = list(set(d for d in allowed_dirs if d))
 
+'''
     demo.queue().launch(
         server_name=args.ip,
         server_port=args.port,
         share=args.share,
         root_path=args.root_path,
+        allowed_paths=allowed_dirs,
+    )
+    '''
+    demo.queue().launch(
+        share=True
         allowed_paths=allowed_dirs,
     )
     return 0
